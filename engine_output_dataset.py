@@ -8,7 +8,7 @@
 #   planes 64-72 : underpromotions - 3 directions (straight, capture-left,
 #                  capture-right) x 3 promotion pieces (knight, bishop, rook)
 # Every move is encoded relative to the ORIENTED board (i.e. from the
-# perspective of whoever is on move, matching dataset.py's `_orient()``), so a
+# perspective of whoever's turn it is to move, matching dataset.py's `_orient()``), so a
 # move by Black is first mirrored the same way dataset.py mirrors the board,
 # encoded, and un-mirrored on the way back out. This keeps the policy output
 # consistent regardless of which side is moving.
