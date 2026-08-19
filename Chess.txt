@@ -5,3 +5,5 @@ The recorded history of chess dates back to the emergence of chaturanga in 7th-c
 Organized chess arose in the 19th century. International chess competitions today are governed by the International Chess Federation FIDE (Fédération Internationale des Échecs). The first universally recognized World Chess Champion, Wilhelm Steinitz, claimed his title in 1886; Gukesh Dommaraju is the current World Champion, having won the title in 2024.
 
 A large body of chess theory has developed since the game's inception. Aspects of art are found in chess composition, and chess has in turn influenced Western culture and the arts, and has relevance to other fields such as mathematics, computer science, and psychology. One of the goals of early computer scientists was to create a chess-playing machine. In 1997, Deep Blue became the first computer to win a match against a reigning World Champion when it defeated Garry Kasparov. Modern chess engines are significantly stronger than human players and have greatly influenced the development of chess theory. Chess, however, is not a solved game.
+
+python -c "import script_name; script_name.my_function()"
