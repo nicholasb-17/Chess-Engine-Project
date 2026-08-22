@@ -63,6 +63,7 @@ def _run_epoch(
     checkpoint_every_steps: int | None = None,
     checkpoint_path: str | None = None,
     epoch: int | None = None,
+    extra_checkpoint_state: dict | None = None,
 ):
     """
     Shared implementation for train_one_epoch() and evaluate(). If
@@ -77,6 +78,9 @@ def _run_epoch(
         batches. This protects a long epoch against losing all progress
         if the runtime disconnects before the epoch finishes -- fit()'s
         own checkpointing only happens once an epoch fully completes.
+    extra_checkpoint_state: extra key/value pairs (e.g. scheduler_state_dict)
+        merged into every mid-epoch checkpoint save, so a resume can restore
+        more than just the optimizer.
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -142,6 +146,7 @@ def _run_epoch(
                     step=num_batches,
                     mid_epoch=True,
                     optimizer_state_dict=optimizer.state_dict(),
+                    **(extra_checkpoint_state or {}),
                 )
                 print(f"{log_prefix}  saved mid-epoch checkpoint at batch {num_batches} -> {checkpoint_path}")
 
@@ -173,6 +178,7 @@ def train_one_epoch(
     checkpoint_every_steps: int | None = None,
     checkpoint_path: str | None = None,
     epoch: int | None = None,
+    extra_checkpoint_state: dict | None = None,
 ):
     """Runs one training epoch (forward + backward + optimizer step). Returns a metrics dict."""
     return _run_epoch(
@@ -186,6 +192,7 @@ def train_one_epoch(
         checkpoint_every_steps=checkpoint_every_steps,
         checkpoint_path=checkpoint_path,
         epoch=epoch,
+        extra_checkpoint_state=extra_checkpoint_state,
     )
 
 
@@ -217,6 +224,7 @@ def fit(
     checkpoint_every: int = 1,
     log_every: int | None = None,
     checkpoint_every_steps: int | None = None,
+    resume_from: str | None = None,
 ):
     """
     Full train/val loop: AdamW + cosine LR schedule, one call to
@@ -233,14 +241,57 @@ def fit(
         training, not just at epoch boundaries -- protects a long epoch's
         progress against a runtime disconnect. Independent of
         `checkpoint_every`, which controls end-of-epoch checkpointing.
+    resume_from: path to a checkpoint saved by this function (or by
+        `model.save_checkpoint()` mid-epoch, via checkpoint_every_steps
+        above) to resume from. Restores optimizer and LR-scheduler state
+        so training continues the cosine schedule from where it left off,
+        rather than restarting it at step 0 -- calling fit() again after
+        a crash WITHOUT resume_from reloads only the model's weights (via
+        a separate ChessNet.load_checkpoint() call before fit()) and
+        starts a brand-new schedule, which is usually not what you want
+        partway through a long run. The model passed to this call must
+        already have the checkpoint's weights loaded (e.g. via
+        ChessNet.load_checkpoint(resume_from)) -- this function resumes
+        the optimizer/scheduler/epoch counter, not the model weights.
+        If the checkpoint was saved mid-epoch (mid_epoch=True), that
+        epoch's training loop is re-run from its start once resumed
+        (PGNIterableDataset streams from the top of the file each time --
+        it does not resume mid-file), rather than skipped.
     """
     device = next(model.parameters()).device
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(epochs, 1))
     scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
 
+    start_epoch = 1
+    if resume_from is not None:
+        checkpoint = torch.load(resume_from, map_location=device)
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        else:
+            print(
+                f"  warning: {resume_from} has no scheduler_state_dict "
+                "(older checkpoint?) -- LR schedule resumes at its initial position"
+            )
+        saved_epoch = checkpoint.get("epoch", 0)
+        # A mid-epoch checkpoint's epoch was still in progress -- re-run it
+        # from the start rather than skipping to the next one, since the
+        # data pipeline can't resume partway through the file anyway.
+        start_epoch = saved_epoch if checkpoint.get("mid_epoch") else saved_epoch + 1
+        print(
+            f"  resumed from {resume_from}: continuing at epoch {start_epoch}/{epochs} "
+            f"(lr={scheduler.get_last_lr()[0]:.2e})"
+        )
+        if start_epoch > epochs:
+            print(
+                f"  warning: resumed epoch {start_epoch} is already past epochs={epochs} -- "
+                "nothing left to train; pass a larger epochs value to continue"
+            )
+
     history = []
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         t0 = time.time()
         train_metrics = train_one_epoch(
             model,
@@ -253,6 +304,7 @@ def fit(
             checkpoint_every_steps=checkpoint_every_steps,
             checkpoint_path=checkpoint_path,
             epoch=epoch,
+            extra_checkpoint_state={"scheduler_state_dict": scheduler.state_dict()},
         )
         val_metrics = evaluate(model, val_loader, device, log_every=log_every, log_prefix="  val    ")
         scheduler.step()
@@ -263,7 +315,13 @@ def fit(
         print(f"  val    {_fmt(val_metrics)}")
 
         if checkpoint_path is not None and epoch % checkpoint_every == 0:
-            model.save_checkpoint(checkpoint_path, epoch=epoch, optimizer_state_dict=optimizer.state_dict())
+            model.save_checkpoint(
+                checkpoint_path,
+                epoch=epoch,
+                mid_epoch=False,
+                optimizer_state_dict=optimizer.state_dict(),
+                scheduler_state_dict=scheduler.state_dict(),
+            )
             print(f"  saved checkpoint -> {checkpoint_path}")
 
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
