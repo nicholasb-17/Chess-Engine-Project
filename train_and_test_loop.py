@@ -52,10 +52,31 @@ def compute_losses(policy_logits, value_pred, policy_target, value_target):
     return policy_loss, value_loss, total_loss
 
 
-def _run_epoch(model, loader, device, optimizer=None, scaler=None):
+def _run_epoch(
+    model,
+    loader,
+    device,
+    optimizer=None,
+    scaler=None,
+    log_every: int | None = None,
+    log_prefix: str = "",
+    checkpoint_every_steps: int | None = None,
+    checkpoint_path: str | None = None,
+    epoch: int | None = None,
+):
     """
     Shared implementation for train_one_epoch() and evaluate(). If
     optimizer is None, runs in no-grad eval mode; otherwise trains.
+
+    log_every: if set, prints a running-metrics line every `log_every`
+        batches -- useful on large datasets where a full epoch can take
+        a long time and epoch-level printing (in fit()) would otherwise
+        leave the cell silent with no sign of progress.
+    checkpoint_every_steps / checkpoint_path: if both are set (train mode
+        only), saves a mid-epoch checkpoint every `checkpoint_every_steps`
+        batches. This protects a long epoch against losing all progress
+        if the runtime disconnects before the epoch finishes -- fit()'s
+        own checkpointing only happens once an epoch fully completes.
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -105,6 +126,25 @@ def _run_epoch(model, loader, device, optimizer=None, scaler=None):
             num_examples += batch_size
             num_batches += 1
 
+            if log_every and num_batches % log_every == 0:
+                print(
+                    f"{log_prefix}batch {num_batches:>6}  n={num_examples:>10,}  "
+                    f"total={sum_total_loss / num_examples:.4f}  "
+                    f"policy={sum_policy_loss / num_examples:.4f}  "
+                    f"value={sum_value_loss / num_examples:.4f}  "
+                    f"policy_top1={sum_correct / num_examples:.1%}"
+                )
+
+            if is_train and checkpoint_every_steps and checkpoint_path and num_batches % checkpoint_every_steps == 0:
+                model.save_checkpoint(
+                    checkpoint_path,
+                    epoch=epoch,
+                    step=num_batches,
+                    mid_epoch=True,
+                    optimizer_state_dict=optimizer.state_dict(),
+                )
+                print(f"{log_prefix}  saved mid-epoch checkpoint at batch {num_batches} -> {checkpoint_path}")
+
     if num_examples == 0:
         raise ValueError(
             "epoch saw zero examples -- check that the PGN file/split "
@@ -122,15 +162,37 @@ def _run_epoch(model, loader, device, optimizer=None, scaler=None):
     }
 
 
-def train_one_epoch(model, loader, optimizer, device, scaler=None):
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    scaler=None,
+    log_every: int | None = None,
+    log_prefix: str = "",
+    checkpoint_every_steps: int | None = None,
+    checkpoint_path: str | None = None,
+    epoch: int | None = None,
+):
     """Runs one training epoch (forward + backward + optimizer step). Returns a metrics dict."""
-    return _run_epoch(model, loader, device, optimizer=optimizer, scaler=scaler)
+    return _run_epoch(
+        model,
+        loader,
+        device,
+        optimizer=optimizer,
+        scaler=scaler,
+        log_every=log_every,
+        log_prefix=log_prefix,
+        checkpoint_every_steps=checkpoint_every_steps,
+        checkpoint_path=checkpoint_path,
+        epoch=epoch,
+    )
 
 
 @torch.inference_mode()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, log_every: int | None = None, log_prefix: str = ""):
     """Runs one evaluation pass with no gradient updates. Returns a metrics dict."""
-    return _run_epoch(model, loader, device, optimizer=None, scaler=None)
+    return _run_epoch(model, loader, device, optimizer=None, scaler=None, log_every=log_every, log_prefix=log_prefix)
 
 
 def _fmt(metrics: dict) -> str:
@@ -153,12 +215,24 @@ def fit(
     weight_decay: float = 1e-4,
     checkpoint_path: str | None = None,
     checkpoint_every: int = 1,
+    log_every: int | None = None,
+    checkpoint_every_steps: int | None = None,
 ):
     """
     Full train/val loop: AdamW + cosine LR schedule, one call to
     train_one_epoch() and evaluate() per epoch, checkpointing every
     `checkpoint_every` epochs if checkpoint_path is given. Returns the
     per-epoch history as a list of {"epoch", "train": {...}, "val": {...}} dicts.
+
+    log_every: if set, prints running train/val metrics every `log_every`
+        batches within each epoch -- recommended for large datasets where
+        a single epoch can take a long time and the per-epoch-only prints
+        below would otherwise leave the cell silent for hours.
+    checkpoint_every_steps: if set (and checkpoint_path is given), also
+        saves a checkpoint every `checkpoint_every_steps` batches *during*
+        training, not just at epoch boundaries -- protects a long epoch's
+        progress against a runtime disconnect. Independent of
+        `checkpoint_every`, which controls end-of-epoch checkpointing.
     """
     device = next(model.parameters()).device
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -168,8 +242,19 @@ def fit(
     history = []
     for epoch in range(1, epochs + 1):
         t0 = time.time()
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device, scaler=scaler)
-        val_metrics = evaluate(model, val_loader, device)
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            scaler=scaler,
+            log_every=log_every,
+            log_prefix="  train  ",
+            checkpoint_every_steps=checkpoint_every_steps,
+            checkpoint_path=checkpoint_path,
+            epoch=epoch,
+        )
+        val_metrics = evaluate(model, val_loader, device, log_every=log_every, log_prefix="  val    ")
         scheduler.step()
         elapsed = time.time() - t0
 
