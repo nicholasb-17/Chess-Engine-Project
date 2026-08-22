@@ -1,6 +1,6 @@
 #Resnet CNN
 # PyTorch policy/value network for the chess engine.
-# Input: 106 x 8 x 8 tensor produced by dataset.py's board_to_tensor().
+# Input: 105 x 8 x 8 tensor produced by dataset.py's board_to_tensor().
 # Output: policy logits over a fixed move-encoding space, and a scalar value estimate.
 #
 # When writing the training loop (separate from this file), wrap the
@@ -17,7 +17,7 @@ import torch.nn.functional as F #for functions
 from engine_output_dataset import POLICY_OUTPUT_SIZE    
 
 # Global Variables for the network architecture
-INPUT_CHANNELS = 106     # must match dataset.py's board_to_tensor() output channel count
+INPUT_CHANNELS = 105     # must match dataset.py's board_to_tensor() output channel count
 NUM_FILTERS = 192        # width of the residual tower
 NUM_RES_BLOCKS = 16      # depth of the residual tower
 SE_RATIO = 8             # squeeze-and-excitation channel reduction ratio inside each
@@ -343,7 +343,7 @@ if __name__ == "__main__":
     num_params = sum(p.numel() for p in net.parameters())
     print(f"total parameters: {num_params:,}")
 
-    # fake batch of 4 positions, matching dataset.py's (106, 8, 8) tensor shape
+    # fake batch of 4 positions, matching dataset.py's (105, 8, 8) tensor shape
     dummy_input = torch.randn(4, INPUT_CHANNELS, 8, 8).to(device)
     policy_logits, value = net(dummy_input)
     print("policy_logits shape:", policy_logits.shape)  # expect (4, 4672)

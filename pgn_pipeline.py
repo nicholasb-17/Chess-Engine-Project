@@ -3,7 +3,7 @@
 # Turns a Lichess PGN file (with embedded [%eval ...] annotations, as
 # produced by Lichess's "Rated games" export with evals enabled) into
 # training examples for network_model.py's ChessNet:
-#   input  : board_to_tensor(board)                     (106, 8, 8)
+#   input  : board_to_tensor(board)                     (105, 8, 8)
 #   policy : encode_move(board, played_move)             int in [0, 4672)
 #   value  : side-to-move-relative eval, squashed to [-1, 1]
 #
@@ -247,7 +247,7 @@ if __name__ == "__main__":
     batch = next(iter(loader))
     x, policy_idx, value = batch
     print(f"\nfirst batch: input={tuple(x.shape)} policy_idx={tuple(policy_idx.shape)} value={tuple(value.shape)}")
-    assert x.shape[1:] == (106, 8, 8)
+    assert x.shape[1:] == (105, 8, 8)
     assert policy_idx.dtype == torch.long
     assert value.dtype == torch.float32
     assert (value.abs() <= 1.0).all()
