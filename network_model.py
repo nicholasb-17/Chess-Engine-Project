@@ -191,6 +191,16 @@ class ChessNet(nn.Module):
         device: str | torch.device | None = None,):
 
         super().__init__()
+        # Recorded on the instance (not just read from the module-level
+        # defaults) so save_checkpoint() can persist the architecture this
+        # specific model was actually built with -- otherwise a ChessNet
+        # constructed with non-default sizes would silently save the
+        # wrong dimensions and fail to reload.
+        self.input_channels = input_channels
+        self.num_filters = num_filters
+        self.num_res_blocks = num_res_blocks
+        self.se_ratio = se_ratio
+
         self.stem_conv = nn.Conv2d(input_channels, num_filters, kernel_size=3, padding=1, bias=False)
         self.stem_bn = nn.BatchNorm2d(num_filters)
         self.res_blocks = nn.ModuleList([ResidualBlock(num_filters, se_ratio=se_ratio) for _ in range(num_res_blocks)])
@@ -293,10 +303,10 @@ class ChessNet(nn.Module):
         torch.save(
             {
                 "model_state_dict": self.state_dict(),
-                "input_channels": INPUT_CHANNELS,
-                "num_filters": NUM_FILTERS,
-                "num_res_blocks": NUM_RES_BLOCKS,
-                "se_ratio": SE_RATIO,
+                "input_channels": self.input_channels,
+                "num_filters": self.num_filters,
+                "num_res_blocks": self.num_res_blocks,
+                "se_ratio": self.se_ratio,
                 **extra,
             },
             path,
