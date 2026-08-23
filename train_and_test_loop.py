@@ -20,6 +20,7 @@
 # consume a DataLoader yielding (input, policy_idx, value) batches, so the
 # same functions work on a tiny 3-game file (this script's demo) or a full
 # multi-GB Lichess export.
+import itertools
 import time
 
 import torch
@@ -64,6 +65,9 @@ def _run_epoch(
     checkpoint_path: str | None = None,
     epoch: int | None = None,
     extra_checkpoint_state: dict | None = None,
+    val_loader=None,
+    val_every_steps: int | None = None,
+    val_max_batches: int | None = None,
 ):
     """
     Shared implementation for train_one_epoch() and evaluate(). If
@@ -81,6 +85,23 @@ def _run_epoch(
     extra_checkpoint_state: extra key/value pairs (e.g. scheduler_state_dict)
         merged into every mid-epoch checkpoint save, so a resume can restore
         more than just the optimizer.
+    val_loader / val_every_steps / val_max_batches: train mode only. If
+        val_loader and val_every_steps are both set, runs a *partial*
+        validation pass (model.eval() + torch.inference_mode(), via
+        evaluate()) every `val_every_steps` training batches, printed
+        alongside the train progress line -- so long epochs (hours on
+        1.4M games) show val signal mid-epoch, not just once at the end.
+        val_max_batches caps how many val batches that partial pass
+        consumes (None = the whole val_loader, which is usually too slow
+        to do repeatedly mid-epoch -- prefer capping it, e.g. 20-50
+        batches, for a quick health check rather than a full val score).
+        Model is switched back to train mode immediately after each
+        partial val pass. Note: PGNIterableDataset streams from the top
+        of its file on every fresh iteration, so a capped partial pass
+        sees the same leading slice of the val set each time it's called
+        within an epoch -- a cheap, repeatable sanity signal, not a
+        shuffled sample. Full, unbiased val numbers still come from the
+        end-of-epoch evaluate() call in fit().
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -150,6 +171,14 @@ def _run_epoch(
                 )
                 print(f"{log_prefix}  saved mid-epoch checkpoint at batch {num_batches} -> {checkpoint_path}")
 
+            if is_train and val_every_steps and val_loader is not None and num_batches % val_every_steps == 0:
+                val_iter = (
+                    val_loader if val_max_batches is None else itertools.islice(val_loader, val_max_batches)
+                )
+                mid_val_metrics = evaluate(model, val_iter, device)
+                print(f"{log_prefix}  mid-epoch val (batch {num_batches})  {_fmt(mid_val_metrics)}")
+                model.train(True)  # evaluate() left the model in eval mode -- restore for training to resume
+
     if num_examples == 0:
         raise ValueError(
             "epoch saw zero examples -- check that the PGN file/split "
@@ -179,8 +208,17 @@ def train_one_epoch(
     checkpoint_path: str | None = None,
     epoch: int | None = None,
     extra_checkpoint_state: dict | None = None,
+    val_loader=None,
+    val_every_steps: int | None = None,
+    val_max_batches: int | None = None,
 ):
-    """Runs one training epoch (forward + backward + optimizer step). Returns a metrics dict."""
+    """
+    Runs one training epoch (forward + backward + optimizer step). Returns
+    a metrics dict.
+
+    val_loader / val_every_steps / val_max_batches: optional periodic
+    mid-epoch validation -- see _run_epoch()'s docstring for details.
+    """
     return _run_epoch(
         model,
         loader,
@@ -193,6 +231,9 @@ def train_one_epoch(
         checkpoint_path=checkpoint_path,
         epoch=epoch,
         extra_checkpoint_state=extra_checkpoint_state,
+        val_loader=val_loader,
+        val_every_steps=val_every_steps,
+        val_max_batches=val_max_batches,
     )
 
 
@@ -225,6 +266,8 @@ def fit(
     log_every: int | None = None,
     checkpoint_every_steps: int | None = None,
     resume_from: str | None = None,
+    val_every_steps: int | None = None,
+    val_max_batches: int | None = None,
 ):
     """
     Full train/val loop: AdamW + cosine LR schedule, one call to
@@ -236,6 +279,15 @@ def fit(
         batches within each epoch -- recommended for large datasets where
         a single epoch can take a long time and the per-epoch-only prints
         below would otherwise leave the cell silent for hours.
+    val_every_steps / val_max_batches: if val_every_steps is set, also runs
+        a quick partial validation pass (model.eval() + torch.inference_mode())
+        every `val_every_steps` training batches, printed alongside the
+        train progress line -- so long epochs show val signal well before
+        the epoch finishes. val_max_batches caps that partial pass's size
+        (recommended for large val sets, e.g. 20-50) since it re-reads
+        val_loader from the start each time it fires. The full, unbiased
+        end-of-epoch val_metrics (used for history/checkpointing) is
+        unaffected -- it still runs evaluate() over the entire val_loader.
     checkpoint_every_steps: if set (and checkpoint_path is given), also
         saves a checkpoint every `checkpoint_every_steps` batches *during*
         training, not just at epoch boundaries -- protects a long epoch's
@@ -305,6 +357,9 @@ def fit(
             checkpoint_path=checkpoint_path,
             epoch=epoch,
             extra_checkpoint_state={"scheduler_state_dict": scheduler.state_dict()},
+            val_loader=val_loader,
+            val_every_steps=val_every_steps,
+            val_max_batches=val_max_batches,
         )
         val_metrics = evaluate(model, val_loader, device, log_every=log_every, log_prefix="  val    ")
         scheduler.step()
