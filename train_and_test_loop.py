@@ -1,4 +1,4 @@
-# Training/testing loop (roadmap step 2).
+# Training/testing loop
 #
 # Trains ChessNet's policy + value heads jointly on the (input, policy_idx,
 # value) triples produced by pgn_pipeline.py's PGNIterableDataset:
@@ -68,6 +68,7 @@ def _run_epoch(
     val_loader=None,
     val_every_steps: int | None = None,
     val_max_batches: int | None = None,
+    track_game_index: bool = False,
 ):
     """
     Shared implementation for train_one_epoch() and evaluate(). If
@@ -102,6 +103,15 @@ def _run_epoch(
         within an epoch -- a cheap, repeatable sanity signal, not a
         shuffled sample. Full, unbiased val numbers still come from the
         end-of-epoch evaluate() call in fit().
+    track_game_index: if True, each batch from `loader` is expected to be
+        a 4-tuple (input, policy_idx, value, game_index) -- i.e. `loader`
+        wraps a PGNIterableDataset built with yield_game_index=True. The
+        highest game_index seen so far is tracked and included as
+        `game_index` in every mid-epoch checkpoint (checkpoint_every_steps),
+        so a resumed run can fast-forward past already-trained games
+        (via PGNIterableDataset's resume_game_index) instead of
+        re-streaming the whole epoch from game 0. Train mode only --
+        ignored when optimizer is None (evaluate() never needs it).
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -114,9 +124,19 @@ def _run_epoch(
     num_examples = 0
     num_batches = 0
 
+    last_game_index = None  # highest game_index fully seen so far (train + track_game_index only)
+
     grad_context = torch.enable_grad() if is_train else torch.inference_mode()
     with grad_context:
-        for input_tensor, policy_target, value_target in loader:
+        for batch in loader:
+            if is_train and track_game_index:
+                input_tensor, policy_target, value_target, batch_game_index = batch
+                # game_index is monotonically increasing within a single
+                # worker's file scan; the max across the batch is the
+                # furthest we've now consumed a full batch from.
+                last_game_index = int(batch_game_index.max().item())
+            else:
+                input_tensor, policy_target, value_target = batch
             input_tensor = input_tensor.to(device)
             policy_target = policy_target.to(device)
             value_target = value_target.to(device)
@@ -161,15 +181,19 @@ def _run_epoch(
                 )
 
             if is_train and checkpoint_every_steps and checkpoint_path and num_batches % checkpoint_every_steps == 0:
+                checkpoint_extra = dict(extra_checkpoint_state or {})
+                if track_game_index and last_game_index is not None:
+                    checkpoint_extra["game_index"] = last_game_index
                 model.save_checkpoint(
                     checkpoint_path,
                     epoch=epoch,
                     step=num_batches,
                     mid_epoch=True,
                     optimizer_state_dict=optimizer.state_dict(),
-                    **(extra_checkpoint_state or {}),
+                    **checkpoint_extra,
                 )
-                print(f"{log_prefix}  saved mid-epoch checkpoint at batch {num_batches} -> {checkpoint_path}")
+                game_index_note = f"  game_index={last_game_index}" if track_game_index else ""
+                print(f"{log_prefix}  saved mid-epoch checkpoint at batch {num_batches} -> {checkpoint_path}{game_index_note}")
 
             if is_train and val_every_steps and val_loader is not None and num_batches % val_every_steps == 0:
                 val_iter = (
@@ -211,6 +235,7 @@ def train_one_epoch(
     val_loader=None,
     val_every_steps: int | None = None,
     val_max_batches: int | None = None,
+    track_game_index: bool = False,
 ):
     """
     Runs one training epoch (forward + backward + optimizer step). Returns
@@ -218,6 +243,7 @@ def train_one_epoch(
 
     val_loader / val_every_steps / val_max_batches: optional periodic
     mid-epoch validation -- see _run_epoch()'s docstring for details.
+    track_game_index: see _run_epoch()'s docstring.
     """
     return _run_epoch(
         model,
@@ -234,6 +260,7 @@ def train_one_epoch(
         val_loader=val_loader,
         val_every_steps=val_every_steps,
         val_max_batches=val_max_batches,
+        track_game_index=track_game_index,
     )
 
 
@@ -268,6 +295,7 @@ def fit(
     resume_from: str | None = None,
     val_every_steps: int | None = None,
     val_max_batches: int | None = None,
+    track_game_index: bool = False,
 ):
     """
     Full train/val loop: AdamW + cosine LR schedule, one call to
@@ -306,9 +334,24 @@ def fit(
         ChessNet.load_checkpoint(resume_from)) -- this function resumes
         the optimizer/scheduler/epoch counter, not the model weights.
         If the checkpoint was saved mid-epoch (mid_epoch=True), that
-        epoch's training loop is re-run from its start once resumed
-        (PGNIterableDataset streams from the top of the file each time --
-        it does not resume mid-file), rather than skipped.
+        epoch's training loop is re-run from its start once resumed --
+        UNLESS the checkpoint has a `game_index` field (saved when
+        track_game_index=True was passed to the interrupted run). In
+        that case this function prints the game_index so you can rebuild
+        train_loader's PGNIterableDataset with
+        resume_game_index=game_index + 1 (and yield_game_index=True)
+        before calling fit() again, letting the epoch fast-forward past
+        already-trained games instead of re-streaming from game 0.
+        Checkpoints without a game_index field still work exactly as
+        before: the epoch re-runs from the top.
+    track_game_index: if True, mid-epoch checkpoints (see
+        checkpoint_every_steps) record the furthest game_index reached so
+        far, enabling the fast-forward resume described above. Requires
+        train_loader to wrap a PGNIterableDataset built with
+        yield_game_index=True, or batches won't have a game_index to
+        report. Has no effect on epoch-boundary checkpoints' correctness,
+        only on whether a resume from a mid-epoch checkpoint can skip
+        ahead.
     """
     device = next(model.parameters()).device
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -328,14 +371,28 @@ def fit(
                 "(older checkpoint?) -- LR schedule resumes at its initial position"
             )
         saved_epoch = checkpoint.get("epoch", 0)
+        saved_game_index = checkpoint.get("game_index")
         # A mid-epoch checkpoint's epoch was still in progress -- re-run it
         # from the start rather than skipping to the next one, since the
-        # data pipeline can't resume partway through the file anyway.
+        # data pipeline can't resume partway through the file anyway
+        # (unless the checkpoint has a game_index -- see below).
         start_epoch = saved_epoch if checkpoint.get("mid_epoch") else saved_epoch + 1
         print(
             f"  resumed from {resume_from}: continuing at epoch {start_epoch}/{epochs} "
             f"(lr={scheduler.get_last_lr()[0]:.2e})"
         )
+        if checkpoint.get("mid_epoch") and saved_game_index is not None:
+            print(
+                f"  checkpoint has game_index={saved_game_index} -- to skip already-trained "
+                f"games this epoch, rebuild train_loader's dataset with "
+                f"resume_game_index={saved_game_index + 1}, yield_game_index=True, and pass "
+                "track_game_index=True to this fit() call"
+            )
+        elif checkpoint.get("mid_epoch"):
+            print(
+                "  no game_index in this checkpoint (saved without track_game_index=True) -- "
+                "this epoch will re-run from game 0"
+            )
         if start_epoch > epochs:
             print(
                 f"  warning: resumed epoch {start_epoch} is already past epochs={epochs} -- "
@@ -360,6 +417,7 @@ def fit(
             val_loader=val_loader,
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
+            track_game_index=track_game_index,
         )
         val_metrics = evaluate(model, val_loader, device, log_every=log_every, log_prefix="  val    ")
         scheduler.step()

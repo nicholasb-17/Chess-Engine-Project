@@ -1,4 +1,4 @@
-# PGN data pipeline (roadmap step 1).
+# PGN data pipeline
 #
 # Turns a Lichess PGN file (with embedded [%eval ...] annotations, as
 # produced by Lichess's "Rated games" export with evals enabled) into
@@ -107,12 +107,26 @@ class PGNIterableDataset(IterableDataset):
         train/val splits at the game level (never split a single game's
         positions across train and val -- that would leak near-duplicate,
         highly correlated positions across the split).
+    resume_game_index: 0-based game index (in file order) to fast-forward
+        to before yielding anything. Games before this index are skipped
+        with chess.pgn.skip_game(), which only scans past the game's PGN
+        text -- it never builds a Game object or walks the mainline, so
+        it's far cheaper than read_game() + generate_examples_from_game()
+        for games you already trained on before a crash. Default 0 means
+        "start from the top of the file", identical to prior behavior.
+    yield_game_index: if True, each yielded example is a 4-tuple
+        (input_tensor, policy_index, value_tensor, game_index) instead of
+        the usual 3-tuple, so a training loop can track how far into the
+        file it's gotten and record that in checkpoints (see
+        train_and_test_loop.py's track_game_index). Default False keeps
+        the original 3-tuple shape for any existing code that unpacks it.
 
     Multi-worker safe: when used with a DataLoader(num_workers > 1), each
     worker reads the whole file but only yields games matching
     `game_index % num_workers == worker_id`, so games are partitioned
     across workers without duplication and without needing to pre-split
-    the file on disk.
+    the file on disk. resume_game_index fast-forwards independently in
+    each worker's own file handle before that split is applied.
     """
 
     def __init__(
@@ -122,6 +136,8 @@ class PGNIterableDataset(IterableDataset):
         min_black_elo: int | None = None,
         skip_no_eval_games: bool = True,
         game_indices: "set[int] | None" = None,
+        resume_game_index: int = 0,
+        yield_game_index: bool = False,
     ):
         super().__init__()
         self.pgn_path = pgn_path
@@ -129,6 +145,8 @@ class PGNIterableDataset(IterableDataset):
         self.min_black_elo = min_black_elo
         self.skip_no_eval_games = skip_no_eval_games
         self.game_indices = game_indices
+        self.resume_game_index = resume_game_index
+        self.yield_game_index = yield_game_index
 
     def _game_passes_filters(self, game: chess.pgn.Game) -> bool:
         headers = game.headers
@@ -153,6 +171,15 @@ class PGNIterableDataset(IterableDataset):
 
         with open(self.pgn_path, encoding="utf-8", errors="replace") as pgn_file:
             game_index = 0
+
+            # Fast-forward past already-consumed games without parsing
+            # moves into tensors (or even building a Game object) --
+            # see resume_game_index in the class docstring.
+            while game_index < self.resume_game_index:
+                if chess.pgn.skip_game(pgn_file) is False:
+                    return  # file ended before reaching resume_game_index
+                game_index += 1
+
             while True:
                 game = chess.pgn.read_game(pgn_file)
                 if game is None:
@@ -173,7 +200,11 @@ class PGNIterableDataset(IterableDataset):
                     input_tensor = board_to_tensor(board)
                     policy_index = encode_move(board, move)
                     value_tensor = torch.tensor(value, dtype=torch.float32)
-                    yield input_tensor, torch.tensor(policy_index, dtype=torch.long), value_tensor
+                    policy_tensor = torch.tensor(policy_index, dtype=torch.long)
+                    if self.yield_game_index:
+                        yield input_tensor, policy_tensor, value_tensor, this_index
+                    else:
+                        yield input_tensor, policy_tensor, value_tensor
 
 
 def count_games(pgn_path: str) -> int:
