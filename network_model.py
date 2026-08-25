@@ -2,14 +2,8 @@
 # PyTorch policy/value network for the chess engine.
 # Input: 105 x 8 x 8 tensor produced by dataset.py's board_to_tensor().
 # Output: policy logits over a fixed move-encoding space, and a scalar value estimate.
-#
-# When writing the training loop (separate from this file), wrap the
-# forward pass in amp_context(device) too, and pair fp16 CUDA autocast
-# with torch.cuda.amp.GradScaler on the backward/optimizer step -- that's
-# where Colab's T4 Tensor Cores give the biggest speedup. infer()/
-# infer_batch() below already do this for MCTS-time evaluation.
-import contextlib
 
+import contextlib
 import torch
 import torch.nn as nn #for classes
 import torch.nn.functional as F #for functions
@@ -17,11 +11,10 @@ import torch.nn.functional as F #for functions
 from engine_output_dataset import POLICY_OUTPUT_SIZE    
 
 # Global Variables for the network architecture
-INPUT_CHANNELS = 105     # must match dataset.py's board_to_tensor() output channel count
+INPUT_CHANNELS = 105     # dataset.py's output
 NUM_FILTERS = 192        # width of the residual tower
 NUM_RES_BLOCKS = 16      # depth of the residual tower
-SE_RATIO = 8             # squeeze-and-excitation channel reduction ratio inside each
-                         # residual block (channels -> channels // SE_RATIO -> channels)
+SE_RATIO = 8             # squeeze-and-excitation channel reduction ratio inside each residual block
 POLICY_CHANNELS = 32     # channels in the policy head's conv reduction
 VALUE_CHANNELS = 4       # channels in the value head's conv reduction
 VALUE_HIDDEN = 256       # hidden units in the value head's fully-connected layer
@@ -88,7 +81,7 @@ class ResidualBlock(nn.Module):
     Residual block with an integrated Squeeze-and-Excitation (SE) channel attention gate.
 
     Computes a residual transformation with the following sequential pipeline:
-    `Conv3x3 -> BN -> ReLU -> Conv3x3 -> BN -> SE -> (+ Identity) -> ReLU`.
+    Conv3x3 -> BN -> ReLU -> Conv3x3 -> BN -> SE -> (+ Identity) -> ReLU.
     """
 
     def __init__(self, channels: int, se_ratio: int = SE_RATIO):
@@ -145,9 +138,8 @@ class PolicyHead(nn.Module):
 
 class ValueHead(nn.Module):
     """
-    Reduces the trunk down to a small number of channels, flattens,
-    passes through a small MLP, and squashes to a scalar in [-1, 1] to represent the evaluation of the position
-    via tanh (from the perspective of the side to move.
+    Reduces the trunk down to a small number of channels -> flattens -> passes through a small MLP -> squashes to a scalar in [-1, 1] to represent the evaluation of the position
+    via the tanh activation function from the perspective of the side to move.
     """
 
     def __init__(self, in_channels: int):
@@ -179,8 +171,7 @@ class ChessNet(nn.Module):
     Trunk: NUM_RES_BLOCKS basic residual blocks
     Heads: PolicyHead and ValueHead, both branching off the trunk output
 
-    forward() returns (policy_logits, value) so a single forward pass
-    produces both training targets' predictions.
+    forward() returns (policy_logits, value) from a single forward pass.
     """
 
     def __init__(self,
@@ -191,11 +182,6 @@ class ChessNet(nn.Module):
         device: str | torch.device | None = None,):
 
         super().__init__()
-        # Recorded on the instance (not just read from the module-level
-        # defaults) so save_checkpoint() can persist the architecture this
-        # specific model was actually built with -- otherwise a ChessNet
-        # constructed with non-default sizes would silently save the
-        # wrong dimensions and fail to reload.
         self.input_channels = input_channels
         self.num_filters = num_filters
         self.num_res_blocks = num_res_blocks
@@ -248,22 +234,18 @@ class ChessNet(nn.Module):
                 "by the caller (e.g. MCTS) before reaching the network -- "
                 "softmax over an all -inf row is undefined (NaN)."
             )
-        # Build the mask in float32 regardless of policy_logits' dtype so a
-        # reduced-precision (fp16/bf16) autocast context upstream can't
-        # silently downgrade the softmax's precision or the returned dtype.
         mask = torch.full_like(policy_logits, float("-inf"), dtype=torch.float32)
         for i, indices in enumerate(legal_move_indices):
             mask[i, indices] = 0.0
         return F.softmax(policy_logits.float() + mask, dim=-1)
 
-    @torch.inference_mode() #turn off gradient tracking for inference, saving memory and speeding up evaluation
+    @torch.inference_mode() #turn off gradient tracking for inference
     def infer(self, tensor: torch.Tensor, legal_move_indices: list[int]) -> tuple[torch.Tensor, float]:
         """
         Single-position convenience inference: takes one (INPUT_CHANNELS, 8, 8)
         board tensor and its legal move indices, returns (policy probs over
         POLICY_OUTPUT_SIZE, scalar value). Puts the model in eval mode and
-        disables gradient tracking. Intended for search code that needs to
-        evaluate one leaf at a time.
+        disables gradient tracking.
         """
         self.eval()
         device = next(self.parameters()).device
@@ -272,27 +254,6 @@ class ChessNet(nn.Module):
             policy_logits, value = self.forward(x)
         policy = self.predict_policy(policy_logits, [legal_move_indices])
         return policy.squeeze(0), value.item()
-
-    @torch.inference_mode()
-    def infer_batch(
-        self, tensors: torch.Tensor, legal_move_indices: list[list[int]]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Batched inference for MCTS leaf evaluation: takes a stacked batch of
-        board tensors (batch, INPUT_CHANNELS, 8, 8) and each position's legal
-        move indices, returns (policy probs, values) for the whole batch in
-        one forward pass. Search code should accumulate several leaves (e.g.
-        via virtual loss) and call this once rather than calling infer()
-        per-leaf, since a single batched GPU call is far cheaper than many
-        small ones.
-        """
-        self.eval()
-        device = next(self.parameters()).device
-        x = tensors.to(device)
-        with amp_context(device):
-            policy_logits, value = self.forward(x)
-        policy = self.predict_policy(policy_logits, legal_move_indices)
-        return policy, value
 
     def save_checkpoint(self, path: str, **extra) -> None:
         """

@@ -1,25 +1,9 @@
 """
 Fast filter for Lichess PGN dumps: games with Stockfish evals + a minimum rating.
-
-KEY OPTIMIZATION: this version never invokes python-chess's move parser/legality
-checker for filtering. A Lichess PGN game is a fixed block of header lines
-followed by a movetext block; every fact we need to filter on (WhiteElo,
-BlackElo, presence of "%eval") is discoverable by scanning that block as text.
-Move legality only matters once you're building tensors downstream (dataset.py),
-not here. Skipping python-chess's parser removes the dominant cost in the
-naive version and also removes exception overhead on malformed/short games.
-
-Handles:
-  - .pgn.zst   (standard Lichess database dump, Zstandard-compressed)
-  - .pgn.zip   (zipped PGN)
-  - .pgn       (plain)
-
 Usage:
     python filter_pgn_fast.py input.pgn.zst output.pgn --min-rating 2000
     python filter_pgn_fast.py input.pgn.zst output.pgn --min-rating 2000 --no-eval-required
     python filter_pgn_fast.py input.pgn.zst output.pgn --min-rating 2000 --max-games 500000
-
-Streams line-by-line so memory use stays flat regardless of input size.
 """
 
 import argparse

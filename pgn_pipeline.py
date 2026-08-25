@@ -1,18 +1,15 @@
 # PGN data pipeline
-#
 # Turns a Lichess PGN file (with embedded [%eval ...] annotations, as
 # produced by Lichess's "Rated games" export with evals enabled) into
 # training examples for network_model.py's ChessNet:
 #   input  : board_to_tensor(board)                     (105, 8, 8)
 #   policy : encode_move(board, played_move)             int in [0, 4672)
 #   value  : side-to-move-relative eval, squashed to [-1, 1]
-#
 # Streams the file game-by-game with chess.pgn.read_game() rather than
 # loading everything into memory.
 # Dataset that needs __len__/__getitem__ random access.
 import math
 import re
-
 import chess
 import chess.pgn
 import torch
@@ -66,27 +63,19 @@ def generate_examples_from_game(game: chess.pgn.Game):
     tuples, where `board` is the position BEFORE played_move (oriented
     with real, unmirrored coordinates -- board_to_tensor/encode_move do
     their own orientation), and `value` is in [-1, 1] relative to
-    whoever is to move on `board`.
-
-    `board` is a fresh, independent chess.Board per example (not a
-    shared mutable reference), and it carries real move history so
-    board_to_tensor()'s 7-ply history channels are populated correctly.
-    Positions whose move comment lacks an [%eval ...] tag are skipped as
-    training examples (no value target available) but the move is still
-    played so later positions keep correct history.
+    whoever is to move on `board`. `board` is a fresh, independent chess.Board per example (not a
+    shared mutable reference)
     """
     board = game.board()
     node = game
     while node.variations:
         next_node = node.variations[0]
         move = next_node.move
-
         eval_cp = parse_eval_cp(next_node.comment or "")
         if eval_cp is not None:
             mover_is_white = board.turn == chess.WHITE
             value = squash_value(eval_cp, mover_is_white)
             yield board.copy(stack=True), move, value
-
         board.push(move)
         node = next_node
 
@@ -110,23 +99,13 @@ class PGNIterableDataset(IterableDataset):
     resume_game_index: 0-based game index (in file order) to fast-forward
         to before yielding anything. Games before this index are skipped
         with chess.pgn.skip_game(), which only scans past the game's PGN
-        text -- it never builds a Game object or walks the mainline, so
-        it's far cheaper than read_game() + generate_examples_from_game()
-        for games you already trained on before a crash. Default 0 means
-        "start from the top of the file", identical to prior behavior.
+        text. Default 0 means"start from the top of the file", identical to prior behavior.
     yield_game_index: if True, each yielded example is a 4-tuple
         (input_tensor, policy_index, value_tensor, game_index) instead of
         the usual 3-tuple, so a training loop can track how far into the
         file it's gotten and record that in checkpoints (see
         train_and_test_loop.py's track_game_index). Default False keeps
         the original 3-tuple shape for any existing code that unpacks it.
-
-    Multi-worker safe: when used with a DataLoader(num_workers > 1), each
-    worker reads the whole file but only yields games matching
-    `game_index % num_workers == worker_id`, so games are partitioned
-    across workers without duplication and without needing to pre-split
-    the file on disk. resume_game_index fast-forwards independently in
-    each worker's own file handle before that split is applied.
     """
 
     def __init__(
@@ -208,7 +187,9 @@ class PGNIterableDataset(IterableDataset):
 
 
 def count_games(pgn_path: str) -> int:
-    """Count total games in a PGN file by scanning headers only (cheap)."""
+    """
+    Count total games in a PGN file by scanning headers only .
+    """
     count = 0
     with open(pgn_path, encoding="utf-8", errors="replace") as pgn_file:
         while chess.pgn.read_headers(pgn_file) is not None:

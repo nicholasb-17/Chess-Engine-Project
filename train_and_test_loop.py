@@ -10,23 +10,14 @@
 # Metrics reported each epoch:
 #   policy_loss, value_loss, total_loss   -- what's actually optimized
 #   policy_top1_acc  -- how often the network's raw argmax move matches the
-#                        human move played (unmasked by legality -- this is
-#                        a supervised-learning sanity metric, not a search
-#                        or play-strength metric)
+#                        human move played
 #   value_mae        -- mean absolute error between predicted and target
 #                        value, in the same [-1, 1] units as squash_value()
-#
-# Both train_one_epoch() and evaluate() are dataset-agnostic: they just
-# consume a DataLoader yielding (input, policy_idx, value) batches, so the
-# same functions work on a tiny 3-game file (this script's demo) or a full
-# multi-GB Lichess export.
 import itertools
 import time
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-
 from network_model import ChessNet, get_device, amp_context
 from pgn_pipeline import PGNIterableDataset, split_train_val
 
@@ -42,10 +33,7 @@ def compute_losses(policy_logits, value_pred, policy_target, value_target):
     Cross-entropy on raw logits against the human-played move index; MSE
     on the value head. Losses are summed (not weighted) -- both are
     already on comparable scales (~O(1)) since policy_loss starts around
-    ln(4672)=8.4 and value MSE starts around 0.3-1.0 for a random network,
-    which is a reasonable, commonly-used starting point for this
-    architecture. Revisit with a weighting term if one head visibly
-    dominates training once real-scale data is used.
+    ln(4672)=8.4 and value MSE starts around 0.3-1.0 for a random network.
     """
     policy_loss = nn.functional.cross_entropy(policy_logits, policy_target)
     value_loss = nn.functional.mse_loss(value_pred, value_target)
@@ -74,15 +62,11 @@ def _run_epoch(
     Shared implementation for train_one_epoch() and evaluate(). If
     optimizer is None, runs in no-grad eval mode; otherwise trains.
 
-    log_every: if set, prints a running-metrics line every `log_every`
-        batches -- useful on large datasets where a full epoch can take
-        a long time and epoch-level printing (in fit()) would otherwise
-        leave the cell silent with no sign of progress.
+    log_every: if set, prints a running-metrics line every `log_every` batches.
     checkpoint_every_steps / checkpoint_path: if both are set (train mode
         only), saves a mid-epoch checkpoint every `checkpoint_every_steps`
         batches. This protects a long epoch against losing all progress
-        if the runtime disconnects before the epoch finishes -- fit()'s
-        own checkpointing only happens once an epoch fully completes.
+        if the runtime disconnects and doesn't interfere with epoch checkpoint saving.
     extra_checkpoint_state: extra key/value pairs (e.g. scheduler_state_dict)
         merged into every mid-epoch checkpoint save, so a resume can restore
         more than just the optimizer.
@@ -90,18 +74,7 @@ def _run_epoch(
         val_loader and val_every_steps are both set, runs a *partial*
         validation pass (model.eval() + torch.inference_mode(), via
         evaluate()) every `val_every_steps` training batches, printed
-        alongside the train progress line -- so long epochs (hours on
-        1.4M games) show val signal mid-epoch, not just once at the end.
-        val_max_batches caps how many val batches that partial pass
-        consumes (None = the whole val_loader, which is usually too slow
-        to do repeatedly mid-epoch -- prefer capping it, e.g. 20-50
-        batches, for a quick health check rather than a full val score).
-        Model is switched back to train mode immediately after each
-        partial val pass. Note: PGNIterableDataset streams from the top
-        of its file on every fresh iteration, so a capped partial pass
-        sees the same leading slice of the val set each time it's called
-        within an epoch -- a cheap, repeatable sanity signal, not a
-        shuffled sample. Full, unbiased val numbers still come from the
+        alongside the train progress line. Full, unbiased val numbers still come from the
         end-of-epoch evaluate() call in fit().
     track_game_index: if True, each batch from `loader` is expected to be
         a 4-tuple (input, policy_idx, value, game_index) -- i.e. `loader`
@@ -304,46 +277,19 @@ def fit(
     per-epoch history as a list of {"epoch", "train": {...}, "val": {...}} dicts.
 
     log_every: if set, prints running train/val metrics every `log_every`
-        batches within each epoch -- recommended for large datasets where
-        a single epoch can take a long time and the per-epoch-only prints
-        below would otherwise leave the cell silent for hours.
+        batches within each epoch
     val_every_steps / val_max_batches: if val_every_steps is set, also runs
         a quick partial validation pass (model.eval() + torch.inference_mode())
         every `val_every_steps` training batches, printed alongside the
-        train progress line -- so long epochs show val signal well before
-        the epoch finishes. val_max_batches caps that partial pass's size
-        (recommended for large val sets, e.g. 20-50) since it re-reads
-        val_loader from the start each time it fires. The full, unbiased
-        end-of-epoch val_metrics (used for history/checkpointing) is
-        unaffected -- it still runs evaluate() over the entire val_loader.
+        train progress line
     checkpoint_every_steps: if set (and checkpoint_path is given), also
         saves a checkpoint every `checkpoint_every_steps` batches *during*
-        training, not just at epoch boundaries -- protects a long epoch's
-        progress against a runtime disconnect. Independent of
-        `checkpoint_every`, which controls end-of-epoch checkpointing.
+        training, not just at epoch boundaries.
     resume_from: path to a checkpoint saved by this function (or by
         `model.save_checkpoint()` mid-epoch, via checkpoint_every_steps
         above) to resume from. Restores optimizer and LR-scheduler state
         so training continues the cosine schedule from where it left off,
-        rather than restarting it at step 0 -- calling fit() again after
-        a crash WITHOUT resume_from reloads only the model's weights (via
-        a separate ChessNet.load_checkpoint() call before fit()) and
-        starts a brand-new schedule, which is usually not what you want
-        partway through a long run. The model passed to this call must
-        already have the checkpoint's weights loaded (e.g. via
-        ChessNet.load_checkpoint(resume_from)) -- this function resumes
-        the optimizer/scheduler/epoch counter, not the model weights.
-        If the checkpoint was saved mid-epoch (mid_epoch=True), that
-        epoch's training loop is re-run from its start once resumed --
-        UNLESS the checkpoint has a `game_index` field (saved when
-        track_game_index=True was passed to the interrupted run). In
-        that case this function prints the game_index so you can rebuild
-        train_loader's PGNIterableDataset with
-        resume_game_index=game_index + 1 (and yield_game_index=True)
-        before calling fit() again, letting the epoch fast-forward past
-        already-trained games instead of re-streaming from game 0.
-        Checkpoints without a game_index field still work exactly as
-        before: the epoch re-runs from the top.
+        rather than restarting it at step 0.
     track_game_index: if True, mid-epoch checkpoints (see
         checkpoint_every_steps) record the furthest game_index reached so
         far, enabling the fast-forward resume described above. Requires
@@ -443,12 +389,11 @@ def fit(
 
 
 # ---------------------------------------------------------------------------
-# Demo / verification: run the loop end-to-end on first_3_games.pgn and print
-# results that can be checked by hand.
+# Demo / verification: run the loop end-to-end on first_3_games.pgn (self made file for testing purposes and not include in github repo) and print results.
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import sys
-
+    #defaults to first_3_games.pgn if no argument is provided, which is a small PGN file with 3 games for testing purposes.
     pgn_path = sys.argv[1] if len(sys.argv) > 1 else "first_3_games.pgn"
 
     torch.manual_seed(0)
@@ -466,10 +411,7 @@ if __name__ == "__main__":
     print(f"train examples: {train_count}   val examples: {val_count}")
     assert train_count > 0 and val_count > 0, "split produced an empty side -- check the file has >= 2 games"
 
-    # A full-size ChessNet (192 filters x 16 res blocks, ~20.6M params) is
-    # far more than 3 games of data can meaningfully train, and is slow on
-    # CPU. For this correctness demo we intentionally build a much smaller
-    # ChessNet (same architecture/classes, fewer filters/blocks) so the
+    # build a much smaller ChessNet (same architecture/classes, fewer filters/blocks)
     # loop runs in seconds -- real training uses network_model.py's
     # defaults (NUM_FILTERS=192, NUM_RES_BLOCKS=16).
     model = ChessNet(num_filters=32, num_res_blocks=2, device=device)
@@ -478,9 +420,7 @@ if __name__ == "__main__":
 
     # --- sanity check: loss should DECREASE and policy_top1_acc should
     # INCREASE over a few epochs on this tiny, repeatedly-seen train set,
-    # since a network can (over)fit 120 examples quickly. This is the
-    # verifiable signal that gradients are flowing correctly through both
-    # heads and the optimizer step is actually updating the weights.
+    # since a network can (over)fit 120 examples quickly.
     print("\n--- training ---")
     history = fit(
         model,

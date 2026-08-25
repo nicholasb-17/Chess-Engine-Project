@@ -1,11 +1,8 @@
-# chess.py is a Python chess library that provides a simple and efficient way to represent and manipulate chess positions, moves, and games.
-# Numpy is a powerful library for numerical computing in Python, providing support for large, multi-dimensional arrays and matrices.
-# Pytorch is an open-source machine learning library.
 import chess
 import numpy as np
 import torch
 
-# Tunable variables
+# Global Variables
 HISTORY_LENGTH = 7          # number of past positions to stack. 8 total positions (current + 7 history) are encoded in the tensor.
 HALFMOVE_CLOCK_CAP = 100.0  # the 50-move rule (for draws) triggers at 100 half-moves
 FULLMOVE_CAP = 500.0        # arbitrary large-game cap, just for normalization
