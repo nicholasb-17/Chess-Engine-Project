@@ -1,8 +1,3 @@
-Thinking Monkey Engine
+[model_trained weights](https://drive.google.com/file/d/1eLAuwX6mR_SckkuNNGyuXMyOdEvHJCa2/view?usp=drive_link)
 
-Author: Nicholas Bao
-
-Residual Neural Network = sub type of CNN that uses skip connections to bypass certain layers of the network.
-
-- helpful for very deep layers
-- "solves" the vanishing gradient problem during backpropagation
+In `play.py` (line 9), replace the path with whatever path you downloaded the above file in.

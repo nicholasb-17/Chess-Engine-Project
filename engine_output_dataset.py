@@ -1,10 +1,10 @@
-# Move <-> policy-index encoding, matching the 8x8x73 AlphaZero-style used by network_model.py's PolicyHead (POLICY_OUTPUT_SIZE = 8*8*73 = 4672).
+# Move <-> policy-index encoding
 # Move Encoding layout:
 #   planes  0-55 : "queen-like" moves - 8 directions x 7 distances
 #                  (covers rook/bishop/queen slides, king single steps,
 #                  pawn single/double forward pushes, pawn diagonal captures,
 #                  and queen promotions)
-#   planes 56-63 : knight moves (8 possible knight deltas)
+#   planes 56-63 : knight moves (8 possible)
 #   planes 64-72 : underpromotions - 3 directions (straight, capture-left,
 #                  capture-right) x 3 promotion pieces (knight, bishop, rook)
 # Every move is encoded relative to the ORIENTED board (i.e. from the
@@ -86,17 +86,6 @@ def decode_index(board: chess.Board, index: int) -> chess.Move | None:
     callers should always verify the result is in board.legal_moves,
     since this function does not know about check legality, only
     geometry plus which piece actually occupies the from-square.
-
-    NOTE on promotions: a queen-like move landing on the back rank (plane
-    < 56, to_rank == 7 in oriented coordinates) is only a queen promotion
-    if the piece on the from-square is actually a pawn. Any other piece
-    (rook, bishop, queen) sliding to the back rank uses the exact same
-    plane, since the encoding is purely geometric. Without checking the
-    piece type here, decode_index would tag a plain rook/queen slide to
-    the back rank with promotion=QUEEN -- and python-chess's Board.push()
-    unconditionally honors move.promotion regardless of what piece is
-    actually moving, silently turning e.g. a rook into a queen on the
-    board. `board` is required precisely to make this check.
     """
     white_to_move = board.turn == chess.WHITE
     from_square, plane = divmod(index, PLANES_PER_SQUARE)
@@ -161,7 +150,7 @@ if __name__ == "__main__":
         assert decoded == move, f"round-trip failed: {move} -> {idx} -> {decoded}"
     print(f"start position: {len(list(board.legal_moves))} legal moves, all round-trip correctly")
 
-    # round-trip check with Black to move (exercises the mirroring path)
+    # round-trip check with Black to move
     board.push_san("e4")
     for move in board.legal_moves:
         idx = encode_move(board, move)
@@ -170,7 +159,6 @@ if __name__ == "__main__":
     print(f"after 1.e4, Black to move: {len(list(board.legal_moves))} legal moves, all round-trip correctly")
 
     # round-trip check on a position with underpromotion options available
-    #FEN notation: https://en.wikipedia.org/wiki/Forsyth%E2%80%93Edwards_Notation
     promo_board = chess.Board("8/P7/8/8/8/8/8/k1K5 w - - 0 1")
     for move in promo_board.legal_moves:
         idx = encode_move(promo_board, move)

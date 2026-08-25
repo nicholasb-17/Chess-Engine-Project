@@ -1,11 +1,8 @@
-# chess.py is a Python chess library that provides a simple and efficient way to represent and manipulate chess positions, moves, and games.
-# Numpy is a powerful library for numerical computing in Python, providing support for large, multi-dimensional arrays and matrices.
-# Pytorch is an open-source machine learning library.
 import chess
 import numpy as np
 import torch
 
-# Tunable variables
+# Global Variables
 HISTORY_LENGTH = 7          # number of past positions to stack. 8 total positions (current + 7 history) are encoded in the tensor.
 HALFMOVE_CLOCK_CAP = 100.0  # the 50-move rule (for draws) triggers at 100 half-moves
 FULLMOVE_CAP = 500.0        # arbitrary large-game cap, just for normalization
@@ -56,23 +53,22 @@ def _repetition_count(board: chess.Board) -> int:
 
 def board_to_tensor(board: chess.Board) -> torch.Tensor:
     """
-    Converts a python-chess Board into a (12 + 7*12 + 1 + 4 + 1 + 1 + 1 + 1 + 1)
-    = 106x 8 x 8 tensor (channel, height, width).
+    Converts a python-chess Board into a (12 + 7*12 + 1 + 4 + 1 + 1 + 1 + 1)
+    = 105x 8 x 8 tensor (channel, height, width).
 
     Channels  0-11  : The current position; oriented to the side to move
                        (0-5 = side to move's pieces, 6-11 = opponent's pieces).
     Channels 12-95  : 7-step move history that are 12 planes each, with the oldest indicated earlier,
                        and oriented consistently with the current position with missing history being zero-padded.
-    Channel     96  : side to move (all 1s if White, all 0s if Black)
-    Channel     97  : side to move's kingside castling rights
-    Channel     98  : side to move's queenside castling rights
-    Channel     99  : opponent's kingside castling rights
-    Channel     100 : opponent's queenside castling rights
-    Channel     101 : en passant target square (oriented coordinates)
-    Channel     102 : side to move is in check
-    Channel     103 : halfmove clock, normalized to [0, 1] (50-move rule)
-    Channel     104 : fullmove number, normalized to [0, 1] (capped)
-    Channel     105 : repetition count --> normalized to [0.0,0.5,1.0] for 1, 2, or 3 repetitions respectively
+    Channel     96  : side to move's kingside castling rights
+    Channel     97  : side to move's queenside castling rights
+    Channel     98  : opponent's kingside castling rights
+    Channel     99  : opponent's queenside castling rights
+    Channel     100 : en passant target square (oriented coordinates)
+    Channel     101 : side to move is in check
+    Channel     102 : halfmove clock, normalized to [0, 1] (50-move rule)
+    Channel     103 : fullmove number, normalized to [0, 1] (capped)
+    Channel     104 : repetition count --> normalized to [0.0,0.5,1.0] for 1, 2, or 3 repetitions respectively
 
     """
     white_to_move = board.turn == chess.WHITE
@@ -93,9 +89,6 @@ def board_to_tensor(board: chess.Board) -> torch.Tensor:
         else:
             # No more history available (near the start of the game) -> pad with zeros.
             channels.append(np.zeros((12, 8, 8), dtype=np.float32))
-
-    # side to move
-    channels.append(np.full((1, 8, 8), 1.0 if white_to_move else 0.0, dtype=np.float32))
 
     # castling rights, relative to the mover
     own_color, opp_color = board.turn, not board.turn
@@ -138,8 +131,7 @@ if __name__ == "__main__":
         board.push_san(move)
     amongus = board_to_tensor(board)
     print("shape:", amongus.shape)
-    assert amongus.shape == (106, 8, 8)
-    print("side to move plane (should be 0s, Black to move):", amongus[96, 0, 0].item())
+    assert amongus.shape == (105, 8, 8)
     print("check plane (should be 1, Qxf7 is check):", amongus[102, 0, 0].item())
     print("halfmove clock plane:", amongus[103, 0, 0].item())
     print("fullmove number plane:", amongus[104, 0, 0].item())
