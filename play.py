@@ -10,7 +10,7 @@ MODEL_PATH = r"C:\Projects\Chess-Engine-Project\model.pt" #use your own path to 
 
 SQUARE = 72
 BOARD_PX = SQUARE * 8
-PANEL_W = 420  # Expanded panel width to fit evaluation text without clipping
+PANEL_W = 420 
 WIN_W = BOARD_PX + PANEL_W
 WIN_H = BOARD_PX
 
@@ -274,27 +274,6 @@ def main():
         status = state["status_msg"] or game_status_text()
         if status:
             screen.blit(small_font.render(status, True, WARN_COL), (BOARD_PX + 15, y0 + 60))
-
-        list_y = y0 + 95
-        screen.blit(small_font.render("Moves:", True, TEXT_COL), (BOARD_PX + 15, list_y))
-        list_y += 22
-        
-        # Prepare move pairs
-        san_history = state["san_history"]
-        move_pairs = []
-        for i in range(0, len(san_history), 2):
-            white_move = san_history[i]
-            black_move = san_history[i + 1] if i + 1 < len(san_history) else ""
-            move_pairs.append((i // 2 + 1, white_move, black_move))
-
-        # Keep max 20 lines visible so it automatically scrolls to show the latest moves
-        max_lines = 20
-        visible_pairs = move_pairs[-max_lines:]
-
-        for move_num, white_move, black_move in visible_pairs:
-            line = f"{move_num}. {white_move} {black_move}"
-            screen.blit(small_font.render(line, True, TEXT_COL), (BOARD_PX + 15, list_y))
-            list_y += 20
 
         if state["pending_promo"]:
             draw_promo_menu()
